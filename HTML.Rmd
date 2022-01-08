@@ -1,0 +1,1558 @@
+---
+title: "Modelos de Riesgo - Modelo Scoring"
+author: "Luis Amagua"
+date: "5/6/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#librerias
+library(openxlsx)
+library(dplyr)
+library(readxl)
+library(readr)
+library(corrplot)
+library(RColorBrewer)
+library(PerformanceAnalytics)
+library(gmodels)
+library(knitr)
+library(ggplot2)
+library(tidyverse)
+library(data.table)
+library(gmodels)
+library(Hmisc)
+library(ggthemes)
+library(dplyr)
+library(plyr)
+```
+
+
+Vamos a cargar los datos
+```{r lectura} 
+ICC <- read.xlsx(xlsxFile = "Data/BaseProd.xlsx",sheet = "ICC")
+Base <- read.xlsx(xlsxFile = "Data/BP.xlsx", sheet = "Base")
+```
+
+```{r}
+# Resumen del dataset
+# str(Base)
+```
+Vamos a corregir los tipos de datos que tenemos en algunas variables, es decir de numericas y categoricas.
+
+```{r}
+Base$MarcaMora_Tarjeta <- as.factor(Base$MarcaMora_Tarjeta)
+Base$ORIGEN_APROBACION <- as.factor(Base$ORIGEN_APROBACION)
+Base$FORMA_PAGO <- as.factor(Base$FORMA_PAGO)
+Base$MARCA_CUENTA_AHORROS <- as.factor(Base$MARCA_CUENTA_AHORROS)
+Base$MARCA_CUENTA_CORRIENTE <- as.factor(Base$MARCA_CUENTA_CORRIENTE)
+Base$SEGMENTO_RIESGO <- as.factor(Base$SEGMENTO_RIESGO)
+Base$SUCURSAL <- as.factor(Base$SUCURSAL)
+Base$GENERO <- as.factor(Base$GENERO)
+Base$INSTRUCCION <- as.factor(Base$INSTRUCCION)
+Base$Fecha2 <- as.factor(Base$Fecha2)
+
+#vamos a eliminar las variables: CODIGO_ID, Fecha , Fecha2 
+Base <- subset(Base, select = -c(CODIGO_ID,Fecha)) 
+
+
+```
+
+
+vamos a verificar si existen datos perdidos
+```{r}
+# Detección si hay alguna fila incompleta
+# any(!complete.cases(Base))
+```
+No hay filas incompletas
+
+
+Podemos utilizar la función missmap para mostrar el porcentaje de datos nulos.
+```{r}
+library(Amelia)   # for missmap
+missmap(Base, main = "Missing values vs observed from Train") 
+#visualization of our data
+```
+
+
+
+# Distribución de variables respuesta
+
+Cuando se crea un modelo, es muy importante estudiar la distribución de la variable respuesta, ya que, a fin de cuentas, es lo que nos interesa predecir.
+
+```{r}
+table(Base$MarcaMora_Tarjeta)
+```
+
+
+```{r}
+ggplot(data = Base, aes(x = MarcaMora_Tarjeta, y = ..count.., fill = MarcaMora_Tarjeta)) +
+  geom_bar() +
+  scale_fill_manual(values = c("cyan4", "orangered2")) +
+  labs(title = "Variable Dependiente") +
+  theme_bw() +
+  theme(legend.position = "bottom")
+
+```
+```{r}
+prop.table(table(Base$MarcaMora_Tarjeta)) %>% round(digits = 2)
+```
+
+Dato que se tienen pocos datos se hara un balanceo de la data
+```{r}
+# Submuestreo(undersampling); tratamos de reducir las observaciones de la clase mayoritaria para que el conjunto de datos final esté equilibrado
+# method: under
+
+# Sobremuestreo(oversampling) : tratamos de generar más observaciones de la clase minoritaria, generalmente replicando las muestras de la clase minoritaria para que el conjunto de datos final esté equilibrado. 
+# method: over
+library(ROSE)
+
+data_balanceada <- ovun.sample(MarcaMora_Tarjeta ~ ., data = Base , 
+                                      method = "both", p=0.3, seed = 5)$data
+table(data_balanceada$MarcaMora_Tarjeta) %>% prop.table()
+
+Base <- data_balanceada
+table(Base$MarcaMora_Tarjeta)
+
+
+ggplot(data = Base, aes(x = MarcaMora_Tarjeta, y = ..count.., fill = MarcaMora_Tarjeta)) +
+  geom_bar() +
+  scale_fill_manual(values = c("cyan4", "orangered2")) +
+  labs(title = "Variable Dependiente") +
+  theme_bw() +
+  theme(legend.position = "bottom")
+
+```
+
+
+balanceo la muestra y debo hacer correcion de los betas o tamicen
+balanceo la muestra y hago el metodo de estimacion de first 
+
+# Testeo y Entrenamiento
+vamos a sacar una data de testeo(test) y de entrenamiento(train), vamos a usar la libreria caret
+
+
+
+```{r}
+# usando la libreria CARET
+## 75% of the sample size 
+smp_size <- floor(0.75 * nrow(Base)) 
+
+## set the seed to make your partition reproductible 
+set.seed(123) 
+train_ind <- sample(seq_len(nrow(Base)), size = smp_size) 
+
+train <- Base[train_ind, ] 
+test <- Base[-train_ind, ]
+
+# verificamos si train y test tienen la misma distribucion que el dataset orginal
+# prop.table(table(train$MarcaMora_Tarjeta)) %>% round(digits = 2)
+# prop.table(table(test$MarcaMora_Tarjeta)) %>% round(digits = 2)
+```
+
+
+
+Vamos analizar solo de la data train
+# Variables numericas
+```{r}
+# str(train)
+```
+
+```{r, fig.width=4, fig.height=2.5}
+#boxplot para analizar atipicos
+library(ggplot2)
+par(mfrow=c(1,2)) 
+ggplot(train) +
+  aes(x = SALDO_TOTAL_TARJETA, y = MarcaMora_Tarjeta) +
+ geom_boxplot(fill = "#5db4bf") +
+ theme_gray()
+
+ggplot(train) +
+ aes(x = CUPO_PROMEDIO_TARJETA, y = MarcaMora_Tarjeta) +
+ geom_boxplot(fill = "#FF5733") +
+ theme_gray()
+
+ggplot(train) +
+ aes(x = SALDO_UTILIZ_PROM_CLIENTE, y = MarcaMora_Tarjeta) +
+ geom_boxplot(fill = "#F6F510") +
+ theme_gray()
+
+ggplot(train) +
+ aes(x = CANTIDAD_TOTAL_AVANCES, y = MarcaMora_Tarjeta) +
+ geom_boxplot(fill = "#F958FB") +
+ theme_gray()
+
+ggplot(train) +
+ aes(x = ANTIGUEDAD_TARJETA_ANIOS, y = MarcaMora_Tarjeta) +
+ geom_boxplot(fill = "#58FB75") +
+ theme_gray()
+
+ggplot(train) +
+ aes(x = PROMEDIO_MENSUAL_CONSUMOS_LOCALES, y = MarcaMora_Tarjeta) +
+ geom_boxplot(fill = "#58FBC4") +
+ theme_gray()
+
+ggplot(train) +
+ aes(x = MAXIMO_NUM_DIAS_VENCIDO, y = MarcaMora_Tarjeta) +
+ geom_boxplot(fill = "#585FFB") +
+ theme_gray()
+
+ggplot(train) +
+ aes(x = NUMERO_OPERACIONES_TITULAR, y = MarcaMora_Tarjeta) +
+ geom_boxplot(fill = "darkcyan") +
+ theme_gray()
+
+ggplot(train) +
+ aes(x = PROMEDIO_DIAS_SOBREGIRO_CC, y = MarcaMora_Tarjeta) +
+ geom_boxplot(fill = "#FB589B") +
+ theme_gray()
+
+ggplot(train) +
+ aes(x = PROMEDIO_MENSUAL_SALDO_CUENTA_PASIVO, y = MarcaMora_Tarjeta) +
+ geom_boxplot(fill = "#FB589B") +
+ theme_gray()
+
+ggplot(train) +
+ aes(x = RIESGO_CLIENTE_TOTAL_GFP, y = MarcaMora_Tarjeta) +
+ geom_boxplot(fill = "#FB589B") +
+ theme_gray()
+
+ggplot(train) +
+ aes(x = VALOR_DEPOSITO_A_PLAZO, y = MarcaMora_Tarjeta) +
+ geom_boxplot(fill = "#FB589B") +
+ theme_gray()
+
+ggplot(train) +
+ aes(x = EDAD, y = MarcaMora_Tarjeta) +
+ geom_boxplot(fill = "aquamarine3") +
+ theme_gray()
+
+ggplot(train) +
+ aes(x = NUM_TC_SIST_FIM, y = MarcaMora_Tarjeta) +
+ geom_boxplot(fill = "bisque2") +
+ theme_gray()
+
+# tambien se vana analizar las variables sistemicas:
+# ICC_Indice confianza consumidor
+# IDEAC
+# CRUDO ORIENTE 
+# PETRÓLEO WTI
+
+ggplot(train) +
+ aes(x = ICC_Indice.confianza.consumidor, y = MarcaMora_Tarjeta) +
+ geom_boxplot(fill = "bisque2") +
+ theme_gray()
+
+ggplot(train) +
+ aes(x = IDEAC, y = MarcaMora_Tarjeta) +
+ geom_boxplot(fill = "bisque2") +
+ theme_gray()
+
+ggplot(train) +
+ aes(x = CRUDO.ORIENTE, y = MarcaMora_Tarjeta) +
+ geom_boxplot(fill = "bisque2") +
+ theme_gray()
+
+ggplot(train) +
+ aes(x = PETRÓLEO.WTI, y = MarcaMora_Tarjeta) +
+ geom_boxplot(fill = "bisque2") +
+ theme_gray()
+
+```
+se va aplicar la transformacion de Box-Cox para mejorar los problemas de normalida y heterocedasticidad.
+
+
+```{r}
+# box cox
+# BCTransform <- function(y, lambda=0) {
+#     if (lambda == 0L) { log(y) }
+#     else { (y^lambda - 1) / lambda }
+# }
+# 
+# BCTransformInverse <- function(yt, lambda=0) {
+#     if (lambda == 0L) { exp(yt) }
+#     else { exp(log(1 + lambda * yt)/lambda) }
+# }
+
+# yt <- BCTransform(Base$SALDO_TOTAL_TARJETA, 0)
+# yo <- BCTransformInverse(yt, 0)
+# unique(round(yo-Base$SALDO_TOTAL_TARJETA),8)
+
+#vamos a introducir una nueva variable que representa
+# la relacion de cuanto tengo para gastar ycuanto estoy gastando,
+# considerando las variables:
+#   
+# SALDO_TOTAL_TARJETA
+# CUPO_PROMEDIO_TARJETA
+```
+construccion nueva variable:
+relacion_saldo_cupo
+
+```{r}
+hist(train$SALDO_UTILIZ_PROM_CLIENTE, breaks=12,main="Saldo utilizado en promedio cliente ", xlab = "SALDO_UTILIZ_PROM_CLIENTE",col = "#0066ff")
+
+hist(train$CUPO_PROMEDIO_TARJETA, breaks=12,main="Cupo promedio de tarjeta",xlab="CUPO_PROMEDIO_TARJETA",col = "#0066ff")
+
+# vamos a crear la variable: relacion_saldo_cupo
+train <- train %>% mutate(relacion_saldo_cupo=SALDO_UTILIZ_PROM_CLIENTE/CUPO_PROMEDIO_TARJETA)
+
+hist(train$relacion_saldo_cupo, breaks=12,col = "#0066ff")
+summary(train$relacion_saldo_cupo)
+boxplot(train$relacion_saldo_cupo,col = "#ffcc00",main="relacion_saldo_cupo")
+
+
+#aparentemente eixisten Na
+sum(is.na(train$relacion_saldo_cupo))  
+# porcentaje de Na
+mean(is.na(train$relacion_saldo_cupo))
+# se tiene un porcentaje de 8% de na, esto se debe a que 
+# existen valores que son de cupo y saldo 0, y al dividir se generan na
+# estos se van a reemplazar con ceros, dado que si no tiene cupo, no tendria saldo
+# y la relacion seria de cero
+
+train$relacion_saldo_cupo[is.na(train$relacion_saldo_cupo)] <- 0
+mean(is.na(train$relacion_saldo_cupo))
+boxplot(train$relacion_saldo_cupo, main="relacion_saldo_cupo")
+sum(is.na(train$relacion_saldo_cupo)) 
+
+# como se trabajara con la variable relacion_saldo_cupo
+# se va aeliminar las otras variables :
+# SALDO_UTILIZ_PROM_CLIENTE,CUPO_PROMEDIO_TARJETA
+train <- subset(train, select = -c(SALDO_UTILIZ_PROM_CLIENTE,CUPO_PROMEDIO_TARJETA)) 
+```
+creacion nueva variable:
+se va cambiar cantidad total de avances, se va a categorizar como una varible 
+dicotomica: usa la tarjeta o no usa la tarjeta
+
+```{r}
+
+library(magrittr)
+library(dplyr)
+hist(train$CANTIDAD_TOTAL_AVANCES, breaks=12,main="Cantidad de Avances ", xlab = "CANTIDAD_TOTAL_AVANCES",col = "#0066ff")
+boxplot(train$CANTIDAD_TOTAL_AVANCES)
+summary(train$CANTIDAD_TOTAL_AVANCES)
+
+train$CANTIDAD_TOTAL_AVANCES[train$CANTIDAD_TOTAL_AVANCES>0] <- 1 
+hist(train$CANTIDAD_TOTAL_AVANCES,main="Cantidad total de avances", xlab="CANTIDAD_TOTAL_AVANCES")
+boxplot(train$CANTIDAD_TOTAL_AVANCES)
+summary(train$CANTIDAD_TOTAL_AVANCES)
+
+#esta variable se considerara tipo factor
+train$CANTIDAD_TOTAL_AVANCES <- as.factor(train$CANTIDAD_TOTAL_AVANCES)
+
+# str(train)
+```
+
+categorizacion de variable
+
+max_num_dias_vencido
+
+```{r}
+hist(train$MAXIMO_NUM_DIAS_VENCIDO, breaks=12,main="Máximo número de dias vencidos ", xlab = "MAXIMO_NUM_DIAS_VENCIDO",col = "#0066ff")
+
+set.seed(1234)
+wcss <- vector()
+for(i in 1:10){
+  wcss[i] <- sum(kmeans(train$MAXIMO_NUM_DIAS_VENCIDO, i)$withinss)
+}
+
+ggplot() + geom_point(aes(x = 1:10, y = wcss), color = 'blue') + 
+  geom_line(aes(x = 1:10, y = wcss), color = 'blue') + 
+  ggtitle("Método del Codo") + 
+  xlab('Cantidad de Centroides k') + 
+  ylab('Maximo número de dias vencidos')
+```
+se va a tomar en 3 categorias
+```{r}
+grupos <- kmeans(x = train[, c('MAXIMO_NUM_DIAS_VENCIDO')], centers = 4, nstart = 1)
+
+train <- train %>% mutate(grupo_MAXIMO_NUM_DIAS_VENCIDO = grupos$cluster)
+train <- train %>% mutate(grupo_MAXIMO_NUM_DIAS_VENCIDO = as.factor(grupo_MAXIMO_NUM_DIAS_VENCIDO))
+
+```
+
+Entonces, veamos el mínimo y máximo de cada grupo formado:
+```{r}
+B <- train %>% filter(grupo_MAXIMO_NUM_DIAS_VENCIDO == 1)
+A <- train %>% filter(grupo_MAXIMO_NUM_DIAS_VENCIDO == 2)
+C <- train %>% filter(grupo_MAXIMO_NUM_DIAS_VENCIDO == 3)
+D <- train %>% filter(grupo_MAXIMO_NUM_DIAS_VENCIDO == 4)
+
+
+c('minA' = min(A$MAXIMO_NUM_DIAS_VENCIDO), 'maxA' = max(A$MAXIMO_NUM_DIAS_VENCIDO),
+  'minB' = min(B$MAXIMO_NUM_DIAS_VENCIDO), 'maxB' = max(B$MAXIMO_NUM_DIAS_VENCIDO),
+   'minC' = min(C$MAXIMO_NUM_DIAS_VENCIDO), 'maxC' =max(C$MAXIMO_NUM_DIAS_VENCIDO),
+   'minD' = min(D$MAXIMO_NUM_DIAS_VENCIDO), 'maxD' =max(D$MAXIMO_NUM_DIAS_VENCIDO))
+
+# vamos a quitarle de nuestra data la variable MAXIMO_NUM_DIAS_VENCIDO
+
+train <- subset(train, select = -c(MAXIMO_NUM_DIAS_VENCIDO)) 
+
+
+train %>% ggplot(aes(grupo_MAXIMO_NUM_DIAS_VENCIDO)) + geom_bar(col = 'blue', fill='blue') + labs(x = 'grupos dias vencidos', y = 'frecuencia') + theme_light()
+
+table(train$grupo_MAXIMO_NUM_DIAS_VENCIDO)
+```
+
+las demas variables a tratar vemos la distribucion
+```{r}
+
+hist(train$PROMEDIO_DIAS_SOBREGIRO_CC, breaks=12,main="Pomedio mensual consumo en locales", xlab = "PROMEDIO_MENSUAL_CONSUMOS_LOCALES",col = "#0066ff")
+
+
+boxplot(train$PROMEDIO_DIAS_SOBREGIRO_CC)
+```
+
+
+
+
+
+
+
+# Variables categoricas
+
+```{r, fig.width=4, fig.height=2.5}
+par(mfrow=c(1,2))  
+ggplot(train,aes(x=ORIGEN_APROBACION,fill=MarcaMora_Tarjeta, ))+
+geom_bar(position = 'fill')
+
+par(mfrow=c(1,2))  
+ggplot(train,aes(x=FORMA_PAGO,fill=MarcaMora_Tarjeta, ))+
+geom_bar(position = 'fill')
+
+par(mfrow=c(1,2))  
+ggplot(train,aes(x=MARCA_CUENTA_CORRIENTE,fill=MarcaMora_Tarjeta, ))+
+geom_bar(position = 'fill')
+
+par(mfrow=c(1,2))  
+ggplot(train,aes(x=MARCA_CUENTA_AHORROS,fill=MarcaMora_Tarjeta, ))+
+geom_bar(position = 'fill')
+
+par(mfrow=c(1,2))  
+ggplot(train,aes(x=SEGMENTO_RIESGO,fill=MarcaMora_Tarjeta, ))+
+geom_bar(position = 'fill')
+
+par(mfrow=c(1,2))  
+ggplot(train,aes(x=SUCURSAL,fill=MarcaMora_Tarjeta, ))+
+geom_bar(position = 'fill')
+
+par(mfrow=c(1,2))  
+ggplot(train,aes(x=GENERO,fill=MarcaMora_Tarjeta, ))+
+geom_bar(position = 'fill')
+
+par(mfrow=c(1,2))  
+ggplot(train,aes(x=INSTRUCCION,fill=MarcaMora_Tarjeta, ))+
+geom_bar(position = 'fill')
+
+par(mfrow=c(1,2))  
+ggplot(train,aes(x=CANTIDAD_TOTAL_AVANCES,fill=MarcaMora_Tarjeta, ))+
+geom_bar(position = 'fill')
+
+par(mfrow=c(1,2))  
+ggplot(train,aes(x=grupo_MAXIMO_NUM_DIAS_VENCIDO,fill=MarcaMora_Tarjeta, ))+
+geom_bar(position = 'fill')
+
+
+
+```
+
+A continuación generaremos algunas para ver las ditribución de las edades de los clientes que caen en mora.
+
+```{r}
+library(gridExtra)
+p5<- ggplot(data=train[train$MarcaMora_Tarjeta==0,], aes(x=EDAD)) + 
+  geom_bar(aes(fill='Sin Mora'), show.legend = FALSE) +
+  labs(title='Número de clientes sin mora por edad', y = 'Número de clientes') + theme_classic()
+
+p6<-ggplot(data=train[train$MarcaMora_Tarjeta==1,], aes(x=EDAD)) + 
+  geom_bar(aes(fill='Mora'), show.legend=FALSE) +
+  labs(title='Número de clientes en mora por edad', y = 'Numero de clientes') +
+  theme_classic()
+
+grid.arrange(p5, p6, ncol=1, nrow=2)
+```
+
+se va a categorizar la variable EDAD
+utilizando la técnica de k−medias, la cual consiste en particionar un conjunto de n observaciones en k grupos en el que cada observación pertenece al grupo cuyo valor medio es más cercano.
+
+```{r}
+set.seed(1234)
+wcss <- vector()
+for(i in 1:10){
+  wcss[i] <- sum(kmeans(train$EDAD, i)$withinss)
+}
+
+ggplot() + geom_point(aes(x = 1:10, y = wcss), color = 'blue') + 
+  geom_line(aes(x = 1:10, y = wcss), color = 'blue') + 
+  ggtitle("Método del Codo") + 
+  xlab('Cantidad de Centroides k') + 
+  ylab('EDAD')
+```
+
+
+
+
+se pueden tomar tres 3 grupos para la categorizacion de la variable EDAD
+```{r}
+grupos <- kmeans(x = train[, c('EDAD')], centers = 4, nstart = 1)
+
+train <- train %>% mutate(grupo_EDAD = grupos$cluster)
+train <- train %>% mutate(grupo_EDAD = as.factor(grupo_EDAD))
+
+```
+
+Entonces, veamos el mínimo y máximo de cada grupo formado:
+```{r}
+B <- train %>% filter(grupo_EDAD == 1)
+A <- train %>% filter(grupo_EDAD == 2)
+C <- train %>% filter(grupo_EDAD == 3)
+D <- train %>% filter(grupo_EDAD == 4)
+
+
+c('minA' = min(A$EDAD), 'maxA' = max(A$EDAD),
+  'minB' = min(B$EDAD), 'maxB' = max(B$EDAD),
+  'minC' = min(C$EDAD), 'maxC' = max(C$EDAD),
+  'minD' = min(D$EDAD), 'maxD' = max(D$EDAD))
+  
+```
+```{r}
+# se quitara la variable edad para evitar confusiones.
+train <- subset(train, select = -c(EDAD))
+```
+
+
+
+vamos a renombrar los grupos de edad para tratralas como variables categoricas.
+```{r}
+# str(train)
+train$grupo_EDAD <- as.character(train$grupo_EDAD)
+train <- train%>%mutate(grupo_EDAD=replace(grupo_EDAD, grupo_EDAD==1,"G_2"))
+train <- train%>%mutate(grupo_EDAD=replace(grupo_EDAD, grupo_EDAD==2,"G_1"))
+train <- train%>%mutate(grupo_EDAD=replace(grupo_EDAD, grupo_EDAD==3,"G_3"))
+train <- train%>%mutate(grupo_EDAD=replace(grupo_EDAD, grupo_EDAD==3,"G_4"))
+
+```
+
+
+
+graficando
+```{r}
+train %>% ggplot(aes(grupo_EDAD)) + geom_bar(col = 'blue', fill='blue') + labs(x = 'Rangos de edad', y = 'frecuencia') + theme_light()
+```
+
+vamos a quitar la variable EDAD y soloamente se trabajara con la variable categoritca grupo_EDAD y tn quitamos la variable codigo y fecha que no aportan informacion relevante al modelo.
+```{r}
+# corregir el tipo de dato grupo_EDAD para que entre en el modelo
+train$grupo_EDAD <- as.factor(train$grupo_EDAD)
+#str(train)
+```
+
+variables macreconomicas
+
+son estacionarias? existe tendencia?
+https://rpubs.com/palominoM/series
+https://bookdown.org/content/2274/series-temporales.html
+
+### ANTES DE HACER EL MODELO TTC QUITAMOS LAS SISTEMICAS
+```{r}
+# train_pit <- train
+```
+
+vamos a eliminar las variables macroeconomicas para evitar problemas del modelo
+```{r}
+# se quitara la variable edad para evitar confusiones.
+str(train)
+```
+
+
+```{r}
+## Separar en numéricas y categóricas
+df_num = train %>% select_if(is.numeric)
+df_cat = train %>% select_if(is.factor)
+## Correlación entre variables numericas
+corrplot(cor(df_num), type="lower", order="hclust",
+         col=brewer.pal(n=8, name="RdYlBu"))
+#chart.Correlation(df_num, histogram=TRUE, pch=19)
+
+
+```
+Se observa que no eixste mucha correlacion en las variables, 
+probablemente no exista problemas de multicolinealidad.
+
+
+
+
+
+A continuación se realizarán tablas cruzadas, entre las variables categóricas y la variable respuesta (dependiente) `targeta_,marcamora`.
+
+```{r, fig.width=6, fig.height=2.5}
+
+library(summarytools)
+print(ctable(x = df_cat$ORIGEN_APROBACION, y = df_cat$MarcaMora_Tarjeta, prop = "t"),
+      method = "render")
+print(ctable(x = df_cat$FORMA_PAGO, y = df_cat$MarcaMora_Tarjeta, prop = "t"),
+      method = "render")
+print(ctable(x = df_cat$MARCA_CUENTA_CORRIENTE, y = df_cat$MarcaMora_Tarjeta, prop = "t"),
+      method = "render")
+print(ctable(x = df_cat$MARCA_CUENTA_AHORROS, y = df_cat$MarcaMora_Tarjeta, prop = "t"),
+      method = "render")
+print(ctable(x = df_cat$SEGMENTO_RIESGO, y = df_cat$MarcaMora_Tarjeta, prop = "t"),
+      method = "render")
+print(ctable(x = df_cat$SUCURSAL, y = df_cat$MarcaMora_Tarjeta, prop = "t"),
+      method = "render")
+print(ctable(x = df_cat$GENERO, y = df_cat$MarcaMora_Tarjeta, prop = "t"),
+      method = "render")
+print(ctable(x = df_cat$INSTRUCCION, y = df_cat$MarcaMora_Tarjeta, prop = "t"),
+      method = "render")
+
+```
+
+# tratamiento de datos
+
+## variables numericas
+
+estadistica descriptiva de las variables numericas
+
+
+## variables categoricas
+vamos a reducir las categoricas de algunas vriables 
+
+
+```{r}
+library(regclass)
+suggest_levels(formula = MarcaMora_Tarjeta~INSTRUCCION,data = train,maxlevels=NA,target=2,recode=FALSE) #
+
+# instruccion
+
+# primero mando la funcion suggets level para la VAR=INSTRUCCION
+# y luego agrupo
+
+# suggest_levels(formula = MarcaMora_Tarjeta~INSTRUCCION,data = train,maxlevels=NA,target=5,recode=FALSE)
+
+
+# instruccion
+df_cat2 = data.frame(INSTRUCCION = rep(NA,dim(df_cat)[1]))
+
+df_cat2$INSTRUCCION = as.character(df_cat$INSTRUCCION)
+df_cat2$INSTRUCCION[df_cat$INSTRUCCION %in% c("SEC","UNI")] <- "SEC_UNI"
+df_cat2$INSTRUCCION[df_cat$INSTRUCCION %in% c("PRI","TEC")] <- "PRI_TEC"
+
+table(df_cat2$INSTRUCCION)
+
+#segmento riesgo
+
+df_cat2$SEGMENTO_RIESGO = as.character(df_cat$SEGMENTO_RIESGO)
+df_cat2$SEGMENTO_RIESGO[df_cat$SEGMENTO_RIESGO %in% c("D","C")] <- "D__C"
+df_cat2$SEGMENTO_RIESGO[df_cat$SEGMENTO_RIESGO %in% c("B","E")] <- "B__E"
+table(df_cat2$SEGMENTO_RIESGO)
+
+#SUCURSAL
+# vamos agrupar en 2 categorias la varibale sucursal de la siguiente forma
+# costa y sierra
+df_cat2$SUCURSAL = as.character(df_cat$SUCURSAL)
+df_cat2$SUCURSAL[df_cat$SUCURSAL %in% c("ESMERALDAS","MACHALA","MANTA","GUAYAQUIL","QUEVEDO")] <- "Costa"
+df_cat2$SUCURSAL[df_cat$SUCURSAL %in% c("CUENCA","IBARRA","QUITO","AMBATO","LOJA","LATACUNGA","SANTO DOMINGO","RIOBAMBA")] <- "Sierra"
+table(df_cat2$SUCURSAL)
+
+# agrego las variables que no se han usado
+df_cat2$MarcaMora_Tarjeta = df_cat$MarcaMora_Tarjeta
+df_cat2$GENERO = df_cat$GENERO
+df_cat2$FORMA_PAGO = df_cat$FORMA_PAGO
+df_cat2$ORIGEN_APROBACION = df_cat$ORIGEN_APROBACION
+df_cat2$MARCA_CUENTA_CORRIENTE = df_cat$MARCA_CUENTA_CORRIENTE
+df_cat2$MARCA_CUENTA_AHORROS = df_cat$MARCA_CUENTA_AHORROS
+df_cat2$INSTRUCCION = df_cat$INSTRUCCION
+df_cat2$grupo_EDAD = df_cat$grupo_EDAD
+df_cat2$Month=df_cat$Fecha2
+df_cat2$CANTIDAD_TOTAL_AVANCES=df_cat$CANTIDAD_TOTAL_AVANCES
+df_cat2$grupo_MAXIMO_NUM_DIAS_VENCIDO=df_cat$grupo_MAXIMO_NUM_DIAS_VENCIDO
+
+
+# ICC_Indice.confianza.consumidor
+# IDEAC
+# PETRÓLEO.WTI
+# CRUDO.ORIENTE
+
+
+```
+para corregir la multicolinealidad
+
+```{r}
+# solopara el ACP
+# df_cat2 %>% mutate_if(is.character,as.factor) -> df_cat2
+# train2 = cbind(acp$x,df_cat2)
+train2 <- df_cat2
+```
+
+
+
+# SELECCION DE LAS VARIABLES
+
+
+```{r}
+# Análisis de variables constantes
+constante <- function(x){
+  if(class(x)=="numeric"){
+    cte <- quantile(x, probs = 0.01, na.rm = TRUE)==quantile(x, probs = 0.99, na.rm = TRUE)
+  } else {
+    tc <- prop.table(table(x))>=0.99
+    cte <- any(tc)
+  }
+  return(cte) 
+}
+
+# Porcentaje de NA's
+porcNA <- function(x){
+  porc <- mean(is.na(x))
+  return(porc) 
+}
+```
+
+```{r}
+# Funcion KS
+TestKS <- function(x, y){
+  if(class(x)!="character"){
+    vars <- data.frame(y,x)
+    vars_e <- subset(vars,subset=vars[,1]==1)
+    vars_f <- subset(vars,subset=vars[,1]==0)
+    ks <- suppressWarnings(ks.test(vars_e[,2],vars_f[,2],alternative="two.sided"))
+    ks <- round(as.numeric(ks$statistic),4)
+  } else{
+    ks <- 0
+  }
+  return(ks)
+}
+```
+
+
+```{r}
+# Valor de informacion (IV)
+TestVI <- function(x,y){
+  if(class(x)=="factor"){
+    tc <- table(y,x)
+    f1 <- tc[1,]
+    f2 <- tc[2,]
+    aux1 <- ifelse(f1/sum(f1)==0,0.001,ifelse(f1/sum(f1)==1,0.999, f1/sum(f1)))
+    aux2 <- ifelse(f2/sum(f2)==0,0.001,ifelse(f2/sum(f2)==1,0.999, f2/sum(f2)))
+    wof <- log(aux2/aux1)
+    wof <- ifelse(wof==-Inf,0,wof)
+    VI <-   sum(((f2/sum(f2))-(f1/sum(f1)))*wof)
+  }else{
+    VI <- 0
+  }
+  return(VI)
+}
+
+# Identificación de variables constantes
+dvars <- colnames(train2)[unname(unlist(sapply(train2, constante)))]
+rm(list = c("constante"))
+
+# Identificación de variables con alto porcentaje de NA's
+porc <- sort(sapply(train2, porcNA), decreasing = TRUE)
+PorcentajeNA <- data.frame(names(porc), as.numeric(porc))
+colnames(PorcentajeNA) <- c("Var", "Porc")
+dvars <- c(dvars, names(porc)[porc > 0.2])
+#rm(list = c("PorcentajeNA", "porc", "porcNA"))
+```
+
+
+```{r}
+# Se identifican las variables categóricas y numéricas
+
+# train2$y<- ifelse(train2$MarcaMora_Tarjeta == "yes", 1, 0)
+#str(train2)
+dvars <- setdiff(colnames(train2), dvars)
+vnum <- colnames(train2[, dvars])[unname(sapply(train2[, dvars], class))!="factor"]
+vcat <- colnames(train2[, dvars])[unname(sapply(train2[, dvars], class))=="factor"]
+dnum <- df_num
+dnum$y <- NULL
+dcat <- train2
+```
+
+```{r}
+# uni las datas: dnum y df_cat2
+train3 <- data.frame(df_num,df_cat2)
+train4 <- data.frame(df_num,df_cat2)
+```
+
+# calculo variables que ingresan al modelo
+
+```{r}
+# Cálculo de KS sobre variables numéricas
+KS <- sort(sapply(dnum, function(i){TestKS(i, train3$MarcaMora_Tarjeta)}), decreasing = TRUE)
+dKS <- data.frame(colnames(dnum), KS)
+colnames(dKS) <- c("Variable", "KS"); rownames(dKS) <- NULL
+#rm(list = c("KS", "TestKS"))
+kable(dKS)
+```
+Se aplica el criterio de seleccionar a las variables que al menos tomen el valor de 5 % en el KS.
+
+consideramos todas las variables porque tienen mas del 5%
+```{r}
+VI <- sort(sapply(df_cat2, TestVI, y=train3$MarcaMora_Tarjeta), decreasing = T)
+dVI <- data.frame(names(VI), VI)
+colnames(dVI) <- c("Variable", "VI"); rownames(dVI) <- NULL
+#rm(list = c("VI", "TestVI"))
+kable(dVI)
+```
+# Planteamiento del modelo logístico
+
+## metodo de firth
+```{r}
+# install.packages("logistf")
+library(logistf)
+# en lkgar del metodo logistico se una logistci firth
+```
+
+
+## TTC 
+No se toman las variables sistemicas
+ 
+```{r}
+modelo_0 = glm(formula = MarcaMora_Tarjeta ~ 
+#ICC_Indice.confianza.consumidor	+
+IDEAC	+
+CRUDO.ORIENTE	+
+#PETRÓLEO.WTI                 
+SALDO_TOTAL_TARJETA	+
+ANTIGUEDAD_TARJETA_ANIOS	+
+PROMEDIO_MENSUAL_CONSUMOS_LOCALES	+
+NUMERO_OPERACIONES_TITULAR	+
+#PROMEDIO_DIAS_SOBREGIRO_CC	+
+PROMEDIO_MENSUAL_SALDO_CUENTA_PASIVO	+
+RIESGO_CLIENTE_TOTAL_GFP	+
+VALOR_DEPOSITO_A_PLAZO	+
+#NUM_TC_SIST_FIM	+
+relacion_saldo_cupo +
+  
+CANTIDAD_TOTAL_AVANCES	+
+grupo_MAXIMO_NUM_DIAS_VENCIDO	+
+FORMA_PAGO	+
+MARCA_CUENTA_CORRIENTE	+
+#MARCA_CUENTA_AHORROS	+
+ORIGEN_APROBACION	+
+#INSTRUCCION	+
+grupo_EDAD	+
+#GENERO	+
+SEGMENTO_RIESGO	+
+  SUCURSAL	  
+  , family = "binomial", data = train3)
+summary(modelo_0)
+
+#####################
+#####################
+#####################
+#####################
+modelo_f = logistf(data=train3, MarcaMora_Tarjeta ~
+SALDO_TOTAL_TARJETA	+
+ANTIGUEDAD_TARJETA_ANIOS	+
+PROMEDIO_MENSUAL_CONSUMOS_LOCALES	+
+NUMERO_OPERACIONES_TITULAR	+
+PROMEDIO_MENSUAL_SALDO_CUENTA_PASIVO	+
+VALOR_DEPOSITO_A_PLAZO	+
+relacion_saldo_cupo	+
+CANTIDAD_TOTAL_AVANCES	+
+grupo_MAXIMO_NUM_DIAS_VENCIDO	+
+FORMA_PAGO	+
+MARCA_CUENTA_CORRIENTE	+
+SEGMENTO_RIESGO	+
+SUCURSAL
+  , firth = FALSE,pl=FALSE)
+summary(modelo_f)
+exp(coef(modelo_f))
+
+#vamos a tomar otro modelo
+```
+ 
+ 
+ Verificamos el poder de predicción en la muestra de entrenamiento por lo que realizamos la matriz de confusión 
+
+```{r}
+# Prediccion
+train3$y_predic = factor(ifelse(predict(modelo_0,train3,type='response')>=0.5, '1','0'))
+train3$y_score = predict(modelo_0,train3,type='response')
+```
+
+```{r}
+# Precision
+library(caret)
+confusionMatrix(train3$y_predic,train3$MarcaMora_Tarjeta) 
+
+```
+
+ 
+ 
+ A continuación presentaremos la curva ROC para la data de entrenamiento. 
+
+```{r, fig.align='center'}
+require(ROCR)
+library(ROCit)
+train3.roc <- prediction(train3$y_score, train3$MarcaMora_Tarjeta)
+plot(performance(train3.roc, "tpr", "fpr"), col = "red", main = "Curva ROC - TTC")
+abline(0, 1, lty = 8, col = "blue")
+```
+
+# Validacion
+```{r}
+train3.auc <- performance(train3.roc, "auc")
+slot(train3.auc, "y.values")
+```
+Entonces, como se tiene un valor de 0.81, aún podemos considerar al modelo bueno
+
+```{r}
+ks.train <- performance(train3.roc, "tpr", "fpr")
+train.ks <- max(attr(ks.train, "y.values")[[1]] - (attr(ks.train, "x.values")[[1]]))
+c(KS = train.ks)
+```
+
+El valor del estadístico KS, no nos proporciona un buen indicador para asegurar que la distribución de los clientes buenos es distinta a la de los clientes malos.
+
+## Multicolinealidad
+Aplicamos la técnica del factor de inflación de la varianza para detectar lsi existe multicolinealidad en las variables exógenas:
+
+```{r}
+library(car)
+vif(modelo_0)
+```
+Como los valores son menores a 4, podemos decir que no hay una fuerte correlación en las variables que explican el modelo
+## analisis ods
+
+```{r}
+odds <- exp(coefficients(modelo_0))
+odds
+
+# http://www.ugr.es/~romansg/material/WebEco/04-Eco2/Ordenador/R/02_LogitProbit.html
+```
+
+
+Una vez obtenido el score se van a dividir en deciles 
+es decir crear 10 grupos y hallar la tasa de malos  por rango de score
+es decir se tendran 10 tasas de malos y mostrar en una grafica el comportamiento
+se espera que mientras peor sea el score mas tasa de malos tenga
+
+```{r}
+# necesito solo 4 decimales 
+ train3$y_score <- as.numeric(round(train3$y_score,4))
+```
+
+
+```{r}
+#exportar la hoja en excel
+library (xlsx)
+# para extraer toda la data
+# write.xlsx (train3, file = "Data/scores.xlsx")
+#para extraer solo el score
+write.xlsx (train3$y_score, file = "Data/scores.xlsx")
+```
+
+
+```{r}
+str(train3$y_score)
+
+D_1 <- train3 %>% filter((0< train3$y_score)& (train3$y_score<0.1)) 
+D_2 <- train3 %>% filter((0.1< train3$y_score)& (train3$y_score<0.2))
+D_3 <- train3 %>% filter((0.2< y_score)& (y_score<0.3))
+D_4 <- train3 %>% filter((0.3<= y_score)& (y_score<0.4))
+D_5 <- train3 %>% filter((0.4< y_score)& (y_score<0.5))
+D_6 <- train3 %>% filter((0.5<= y_score)& (y_score<0.6))
+D_7 <- train3 %>% filter((0.6<= y_score)& (y_score<0.7))
+D_8 <- train3 %>% filter((0.7<= y_score)& (y_score<0.8))
+D_9 <- train3 %>% filter((0.8<= y_score)& (y_score<0.9))
+D_10 <- train3 %>% filter((0.9<= y_score)& (y_score<=1))
+
+table(D_9$MarcaMora_Tarjeta)
+
+  
+```
+
+# Grupos homogeneos 
+
+## TTC
+
+El sistema de clasificación TTC (A través del ciclo) es un sistema donde la clasificación de los clientes en su mayoría no se ve afectado por las condiciones macroeconómicas del país
+
+Para realizar este modelo utilizando la filsofía TTC, vamos tomar las variables idiosincráticas.
+
+es decir nos sirve el modelo logit anterior anterior
+
+```{r}
+# train3 <- data.frame(train3$y_score)
+# necesito solo 4 decimales 
+ train3$y_score <- as.numeric(round(train3$y_score,4))
+# train3
+```
+veamos en cuantos grupos se podrian considerar
+```{r}
+set.seed(1234)
+wcss <- vector()
+for(i in 1:10){
+  wcss[i] <- sum(kmeans(train3$y_score, i)$withinss)
+}
+
+ggplot() + geom_point(aes(x = 1:10, y = wcss), color = 'blue') + 
+  geom_line(aes(x = 1:10, y = wcss), color = 'blue') + 
+  ggtitle("Método del Codo ") + 
+  xlab('Cantidad de Centroides k') + 
+  ylab('score')
+```
+se van a tomar 3 grupos
+
+```{r}
+grupos <- kmeans(x =train3$y_score, centers = 3, nstart = 1)
+  ## GH = grupos homogeneos
+train3 <- train3 %>% mutate(GH = grupos$cluster)
+train3 <- train3 %>% mutate(GH = as.factor(GH))
+```
+
+```{r}
+C1 <- train3 %>% filter(GH == 1)
+C2 <- train3 %>% filter(GH == 2)
+C3 <- train3 %>% filter(GH == 3)
+#C4 <- train3 %>% filter(GH == 4)
+
+c('minC1' = min(C1$y_score), 'maxC1' = max(C1$y_score),
+  'minC2' = min(C2$y_score), 'maxC2' = max(C2$y_score),
+  'minC3' = min(C3$y_score), 'maxC3' = max(C3$y_score))
+  #'minC4' = min(C4$y_score), 'maxC4' = max(C4$y_score))
+```
+
+para verificar si los gruops creados son correctos probaremos con los siguientes estadistciso:
+
+## dunnet t3
+```{r}
+library(DescTools)
+table(train3$Month)
+
+# library(DescTools)
+aux1 = train3 %>% filter(Month==1)
+# aux2 = df %>% filter(tiempo==2)
+# aux3 = df %>% filter(tiempo==3)
+# aux4 = df %>% filter(tiempo==4)
+# aux5 = df %>% filter(tiempo==5)
+# aux6 = df %>% filter(tiempo==6)
+# aux7 = df %>% filter(tiempo==7)
+# aux8 = df %>% filter(tiempo==8)
+
+# DunnettTest(x=as.numeric(aux1$y_score), g=as.factor(aux1$GH))
+# DunnettTest(x=aux2$score, g=aux2$cluster)
+# DunnettTest(x=aux3$score, g=aux3$cluster)
+# DunnettTest(x=aux4$score, g=aux4$cluster)
+# DunnettTest(x=aux5$score, g=aux5$cluster)
+# DunnettTest(x=aux6$score, g=aux6$cluster)
+# DunnettTest(x=aux7$score, g=aux7$cluster)
+# DunnettTest(x=aux8$score, g=aux8$cluster)
+
+
+
+
+```
+
+
+
+
+## Bartlett test of homogeneity of variances
+
+```{r}
+G1 <- C1; G2 <- C2;  G3 <- C3
+#; G4 <- C4
+
+G1$GH <- as.character(G1$GH)
+G2$GH <- as.character(G2$GH)
+G3$GH <- as.character(G3$GH)
+#G4$GH <- as.character(G4$GH)
+
+variables <- c(G2$y_score, G3$y_score)
+categorias <- c(G2$GH, G3$GH)
+bartlett.test(variables, categorias)
+
+table(G3$MarcaMora_Tarjeta)
+```
+Podemos ver que, como el p_valor es menor a un α=0.05, se rechaza la hipótesis nula y, en consecuencia, las varianzas entre el grupo 1 y grupo 2 son diferentes. De manera igual manera se corroboró para las otras combinaciones de grupos.(entre el grupo 3 y 4 me p-value mayor a 0.59 )
+
+## test de Games y Howell
+para veririfcar que los grupos son heterogeneos
+
+```{r}
+library(rstatix)
+games_howell_test(data = train3, y_score ~GH)
+```
+En consecuencia, vemos que los grupos homogéneos son heterogéneos entre sí
+
+```{r}
+# anova_results=aov(train3$y_score~train3$GH)        
+#  anova_results
+```
+```{r}
+# summary(anova_results)
+```
+##  Índice Davies–Bouldin
+
+```{r}
+library(clusterSim)
+library(clValid)
+
+train3$GH <- as.integer(train3$GH)
+## Homogeneidad
+index.DB(data.frame(train3$y_score),train3$GH ,d=NULL, centrotypes="centroids", p=1, q=1)
+
+
+```
+El valor del índice es 0.37425, dado que es un valor bajo es posible concluir que nuestros cluster están clasificando correctamente a los datos.
+
+
+
+Utilizamos el estadístico Silhouette donde su valor puede estar entre -1 y 1,
+
+## estadístico Silhouette
+```{r}
+# library(clusterSim)
+# library(factoextra)
+# library(cluster)
+# library(dplyr)
+# 
+# train3$GH <- as.integer(train3$GH)
+# train3_num <- train3 %>% select_if(is.numeric)
+# sil <- silhouette(grupos$cluster, dist(scale(train3_num)))
+# fviz_silhouette(sil)
+
+
+```
+
+
+
+## el test Dunnett T3,
+
+
+se va hacer la grafica del ciclo economico
+```{r}
+library(ggplot2)
+ggplot(ICC, aes(x = c(1:nrow(ICC)), y = ICC$CRUDO.ORIENTE)) + geom_line()
+```
+
+```{r}
+#para la PD del grupo
+
+no <- train3 %>% filter(MarcaMora_Tarjeta == 0) %>% group_by(GH, Month) %>% dplyr::summarise(tmalos = n())
+
+yes <- train3 %>% filter(MarcaMora_Tarjeta == 1) %>% group_by(GH, Month) %>% dplyr::summarise(tbuenos = n())
+
+mes <- full_join(no, yes, by = c('GH', 'Month'))
+mes$tmalos <- mes$tmalos/(mes$tmalos + mes$tbuenos)
+
+PD <- mes %>% group_by(GH) %>% dplyr::summarise(PD = mean(tmalos, na.rm = TRUE))
+PD
+
+
+```
+
+Así, una vez calculada la tasa de mora promedio de cada grupo, tomando en cuenta la frecuencia de incumplimientos observados que posee cada cliente en el grupo, se presenta el gráfico de las PD agrupadas en cada periodo de tiempo en los 4 grupos de riesgo bajo la filosofía PIT.
+```{r}
+#str(train3)
+train3$Month <- as.numeric(train3$Month)
+ggplot(train3,aes(x=Month,y=ICC_Indice.confianza.consumidor)) + geom_line()
+
+ggplot(train3, aes(x = Month, y = y_score, color = GH)) + geom_point()
+
+
+# meme :C
+# ggplot(train3,aes(x=Month,y=y_score,colour=GH,group=GH)) + geom_line()
+
+```
+
+
+Realizamos gráficos de caja y violín para los grupos
+```{r}
+# par(mfrow=c(1,2)) 
+# Boxplot por grupo
+train3$GH <- as.factor(train3$GH)
+
+ggplot(data = train3, aes(x = GH, y = y_score)) +
+       stat_boxplot(geom = "errorbar", # Bigotes
+                    width = 0.2) +
+       geom_boxplot(fill = "#4271AE", colour = "#1F3552", # Colores
+                    alpha = 0.9, outlier.colour = "red") +
+       scale_y_continuous(name = "PD") +  # Etiqueta de la variable continua
+       scale_x_discrete(name = "Grupos") +        # Etiqueta de los grupos
+       ggtitle("Boxplot por grupos ") +       # Título del plot
+       theme(axis.line = element_line(colour = "black", # Personalización del tema
+                                      size = 0.25))
+
+
+```
+
+
+
+```{r}
+no <- train3 %>% filter(MarcaMora_Tarjeta == 0) %>% group_by(GH, Month) %>% dplyr::summarise(tmalos = n())
+
+yes <- train3 %>% filter(MarcaMora_Tarjeta== 1) %>% group_by(GH, Month) %>% dplyr::summarise(tbuenos = n())
+
+mes <- full_join(no, yes, by = c('GH', 'Month'))
+mes$tmalos <- mes$tmalos/(mes$tmalos + mes$tbuenos)
+```
+
+```{r}
+ggplot(data=mes) + geom_line(aes(x = Month, y = tmalos, color = GH), size=1) +
+  labs(x = "Periodo", y = "PD",
+       title = "Ciclo Económico") +
+  theme_bw()+
+  theme(legend.background = element_rect()) +
+  scale_color_hue(name = 'GH')
+```
+
+
+```{r}
+mes <- full_join(no, yes, by = c('GH', 'Month'))
+mes$total <- mes$tmalos + mes$tbuenos
+bdd <- mes %>% group_by(Month) %>% mutate(porc = round(100*(total/sum(total,na.rm=T)),2))
+
+ggplot(data=bdd,
+       aes(x = factor(Month),
+           y = porc, fill = GH)) +
+  geom_bar(stat="identity") +
+  theme_minimal() +
+  xlab("Meses") + ylab("Porcentaje") +
+  labs(title = "Porcentaje de clientes por grupos en cada mes",
+       fill= "Grupos") +
+  scale_fill_brewer(palette="Spectral") 
+```
+
+
+
+
+
+# Entrega final
+EAD
+Ahora, asignamos los valores EAD (exposure at default) a cada grupo, tales que, siguiendo el nivel de riesgo de cada uno de los grupos se tenga que:
+
+EADG3>EADG2>EADG1
+
+```{r}
+# Asignación de EAD
+train3$EAD <- train3$GH
+#train3$EAD <- as.factor(train3$EAD)
+library(plyr)
+train3$EAD <- revalue(train3$EAD, c('3' = 5000, '2' = 3000, '1' = 1000))
+detach(package:plyr)
+```
+
+
+LGD
+
+Para los valores del LGD de los individuos, se _simula_ una distribución Beta con parámetros 0,5 y 0,5. Se presenta un histograma de la distribución simulada:
+
+```{r}
+lgd_dist <- data.frame(dist = rbeta(nrow(train3), 0.5, 0.5))
+
+ggplot(lgd_dist, aes(x=dist)) + 
+  geom_histogram(binwidth = 0.025, fill="#1F84E9", color="#024385") +
+  labs(title = "LGD") + theme_minimal() +
+  theme(axis.title.x = element_blank())+
+  ylab("Conteo")
+```
+Así, para que se satisfaga que el LGD de los peores grupos sean más altos que el de los mejores, es deicr,
+
+```{r}
+LGD <- sort(lgd_dist$dist, decreasing = TRUE)
+train3$LGD <- NA
+
+g1 <- which(train3$GH == '3')
+g2 <- which(train3$GH == '2')
+g3 <- which(train3$GH == '1') 
+
+
+train3$LGD[g1] <- LGD[1:length(g1)]
+train3$LGD[g2] <- LGD[(length(g1)+1):(length(g1)+length(g2))]
+train3$LGD[g3] <- LGD[(length(g1)+length(g2)+1):(length(g1)+length(g2)+length(g3))]
+
+head(train3$LGD)
+```
+Así, se muestra la siguiente tabla que especifica lo anterior:
+
+```{r}
+train3 %>% group_by(GH) %>% dplyr::summarise("LGD del grupo" = mean(LGD))
+```
+PE
+
+Entonces, con las funciones de riesgo calculadas, se obtiene el PE de cada persona, respecto al grupo al que pertenece; se dibuja el histograma de estos valores:
+```{r}
+train3 <- train3 %>% mutate(PE = y_score*(as.numeric(EAD))*LGD)
+ggplot(train3, aes(x = PE)) + 
+  geom_histogram(binwidth = 10, fill="#1F84E9", color="#024385") +
+  labs(title = "Distribución de la Pérdida Esperada") + theme_minimal() +
+  theme(axis.title.x = element_blank())+
+  ylab("Conteo")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# calculo variables que ingresan al modelo
+
+```{r}
+# Cálculo de KS sobre variables numéricas
+KS <- sort(sapply(dnum, function(i){TestKS(i, train4$MarcaMora_Tarjeta)}), decreasing = TRUE)
+dKS <- data.frame(colnames(dnum), KS)
+colnames(dKS) <- c("Variable", "KS"); rownames(dKS) <- NULL
+#rm(list = c("KS", "TestKS"))
+kable(dKS)
+```
+Se aplica el criterio de seleccionar a las variables que al menos tomen el valor de 5 % en el KS.
+
+consideramos todas las variables porque tienen mas del 5%
+```{r}
+VI <- sort(sapply(df_cat2, TestVI, y=train4$MarcaMora_Tarjeta), decreasing = T)
+dVI <- data.frame(names(VI), VI)
+colnames(dVI) <- c("Variable", "VI"); rownames(dVI) <- NULL
+#rm(list = c("VI", "TestVI"))
+kable(dVI)
+```
+
+
+
+```{r}
+modelo_p1 = glm(formula = MarcaMora_Tarjeta ~
+PETRÓLEO.WTI	+
+SALDO_TOTAL_TARJETA	+
+ANTIGUEDAD_TARJETA_ANIOS	+
+PROMEDIO_MENSUAL_CONSUMOS_LOCALES	+
+NUMERO_OPERACIONES_TITULAR	+
+PROMEDIO_MENSUAL_SALDO_CUENTA_PASIVO	+
+VALOR_DEPOSITO_A_PLAZO	+
+relacion_saldo_cupo +
+CANTIDAD_TOTAL_AVANCES	+
+grupo_MAXIMO_NUM_DIAS_VENCIDO	+
+FORMA_PAGO	+
+MARCA_CUENTA_CORRIENTE
+  , family = "binomial", data = train4)
+summary(modelo_p1)
+
+#vamos a tomar otro modelo
+```
+
+
+ 
+ Verificamos el poder de predicción en la muestra de entrenamiento por lo que realizamos la matriz de confusión 
+
+```{r}
+# Prediccion
+train4$y_predic = factor(ifelse(predict(modelo_p1,train4,type='response')>=0.5, '1','0'))
+train4$y_score = predict(modelo_p1,train4,type='response')
+```
+
+```{r}
+# Precision
+library(caret)
+confusionMatrix(train4$y_predic,train4$MarcaMora_Tarjeta) 
+
+```
+A continuación presentaremos la curva ROC para la data de entrenamiento. 
+
+```{r, fig.align='center'}
+require(ROCR)
+library(ROCit)
+train4.roc <- prediction(train4$y_score, train4$MarcaMora_Tarjeta)
+plot(performance(train4.roc, "tpr", "fpr"), col = "red", main = "Curva ROC para la data train")
+abline(0, 1, lty = 8, col = "blue")
+```
+ # Validacion
+```{r}
+train4.auc <- performance(train4.roc, "auc")
+slot(train4.auc, "y.values")
+```
+Entonces, como se tiene un valor de 0.77, aún podemos considerar al modelo bueno
+
+```{r}
+ks.train <- performance(train4.roc, "tpr", "fpr")
+train.ks <- max(attr(ks.train, "y.values")[[1]] - (attr(ks.train, "x.values")[[1]]))
+c(KS = train.ks)
+```
+El valor del estadístico KS, no nos proporciona un buen indicador para asegurar que la distribución de los clientes buenos es distinta a la de los clientes malos.
+
+## Multicolinealidad
+Aplicamos la técnica del factor de inflación de la varianza para detectar lsi existe multicolinealidad en las variables exógenas:
+
+```{r}
+library(car)
+vif(modelo_p1)
+```
+ 
+Si se toman las dos variables: CRUDO.ORIENTE y PETRÓLEO.WTI se tiene presencia de multicolinealidad.
+
+
+
+Como los valores son menores a 4, podemos decir que no hay una fuerte correlación en las variables que explican el modelo
+## analisis ods
+
+```{r}
+odds <- exp(coefficients(modelo_p1))
+odds
+
+# http://www.ugr.es/~romansg/material/WebEco/04-Eco2/Ordenador/R/02_LogitProbit.html
+```
+
+# Entrega final
+EAD
+Ahora, asignamos los valores EAD (exposure at default) a cada grupo, tales que, siguiendo el nivel de riesgo de cada uno de los grupos se tenga que:
+
+EADG3>EADG2>EADG1
+
+```{r}
+# Asignación de EAD
+train3$EAD <- train3$GH
+#train3$EAD <- as.factor(train3$EAD)
+library(plyr)
+train3$EAD <- revalue(train3$EAD, c('3' = 500, '2' = 300, '1' = 100))
+detach(package:plyr)
+```
+
+
+LGD
+
+Para los valores del LGD de los individuos, se _simula_ una distribución Beta con parámetros 0,5 y 0,5. Se presenta un histograma de la distribución simulada:
+
+```{r}
+lgd_dist <- data.frame(dist = rbeta(nrow(train3), 0.5, 0.5))
+
+ggplot(lgd_dist, aes(x=dist)) + 
+  geom_histogram(binwidth = 0.025, fill="#1F84E9", color="#024385") +
+  labs(title = "LGD - Histograma") + theme_minimal() +
+  theme(axis.title.x = element_blank())+
+  ylab("Conteo")
+```
+Así, para que se satisfaga que el LGD de los peores grupos sean más altos que el de los mejores, es deicr,
+
+```{r}
+LGD <- sort(lgd_dist$dist, decreasing = TRUE)
+train3$LGD <- NA
+
+g1 <- which(train3$GH == '1')
+g2 <- which(train3$GH == '2')
+g3 <- which(train3$GH == '3') 
+
+
+train3$LGD[g1] <- LGD[1:length(g1)]
+train3$LGD[g2] <- LGD[(length(g1)+1):(length(g1)+length(g2))]
+train3$LGD[g3] <- LGD[(length(g1)+length(g2)+1):(length(g1)+length(g2)+length(g3))]
+
+head(train3$LGD)
+```
+Así, se muestra la siguiente tabla que especifica lo anterior:
+
+```{r}
+train3 %>% group_by(GH) %>% dplyr::summarise("LGD del grupo" = mean(LGD))
+```
+PE
+
+Entonces, con las funciones de riesgo calculadas, se obtiene el PE de cada persona, respecto al grupo al que pertenece; se dibuja el histograma de estos valores:
+```{r}
+train3 <- train3 %>% mutate(PE = y_score*(as.numeric(EAD))*LGD)
+ggplot(train3, aes(x = PE)) + 
+  geom_histogram(binwidth = 10, fill="#1F84E9", color="#024385") +
+  labs(title = "Distribución de la Pérdida Esperada") + theme_minimal() +
+  theme(axis.title.x = element_blank())+
+  ylab("Conteo")
+```
+
+## ISA
+```{r}
+##Simulamos 41188 observaciones de los lgd con una distribucion beta de parametros 0.5, 0.5, ordenamos los lgd de forma decreciente y ordenamos los scores por grupo, de forma que el peor grupo tenga los lgd mas altos y el mejor grupo los lgd mas bajos y finalmente calculamos la media de los lgd por grupo 
+set.seed(2300)
+simu = rbeta(41188, 0.5, 0.5)
+simu =data.frame(sort(simu*100, decreasing = TRUE))
+names(simu)
+
+
+## Grafico de la simulacion
+hist(simu$sort.simu...100..decreasing...TRUE.,freq = FALSE,main = "simulación LGD", xlab = "LGD",col = "#0066ff")
+# ex(dbeta(x, 0.5, 0.5),
+#       add = TRUE, col = "red",
+#       lwd = 2)
+```
+```{r}
+#llamo df a la data train3 ordenada
+df = train3[order(train3$y_score),]
+```
+
+
+
+```{r}
+names(simu)[names(simu) == 'sort.simu...100..decreasing...TRUE.'] <- 'LGD'
+names(simu)
+```
+
+grafico de la perdida esperada de la cartera, se considera el ead del grupo 1 como 100 y el ead del grupo 2 como 300
+```{r}
+y = df %>% dplyr::select(Month) %>% 
+  mutate(pe = ifelse(df$GH ==3 ,df$y_score*simu$LGD*100,ifelse(df$GH ==1, df$y_score*simu$LGD*300, df$y_score*simu$LGD*500)))
+
+
+ggplot(y) +
+ aes(x = y$pe) +
+ geom_density(adjust = 1L, fill = "#0066ff") +labs(x = "PE")
+ theme_gray()
+```
+
+```{r}
+## calculo del var 
+var = unname(quantile(y$pe,0.99))
+var
+## perdida esperada de la cartera
+perdida_esperada =  mean(y$pe)
+perdida_esperada
+## dinero que debe guardar el banco 
+cap_esp = var  - perdida_esperada
+cap_esp
+```
+## lo mismo pero por tiempo
+
+```{r}
+y1= y %>% filter(Month==3)
+
+ggplot(y1) +
+ aes(x = y1$pe) +
+ geom_density(adjust = 1L, fill = "#0066ff") + labs(x = "PE")+
+ theme_gray()
+
+var = unname(quantile(y1$pe,0.99))
+var
+perdida_esperada =  mean(y1$pe)
+perdida_esperada
+capital_esperado=c()
+capital_esperado[1] = var  - perdida_esperada
+capital_esperado[1]
+```
+
+
+
+
+
